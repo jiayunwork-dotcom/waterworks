@@ -222,13 +222,17 @@ if page == "数据导入与工艺概览":
                 ))
                 
                 if i < len(stages_info) - 1:
-                    fig.add_trace(go.Scatter(
-                        x=[x + 0.3, x_positions[i+1] - 0.3],
-                        y=[y_base, y_base],
-                        mode='lines',
-                        line=dict(color='gray', width=2, arrowhead=True),
-                        showlegend=False,
-                    ))
+                    fig.add_annotation(
+                        x=x_positions[i+1] - 0.25,
+                        y=y_base,
+                        ax=x + 0.25,
+                        ay=y_base,
+                        arrowhead=2,
+                        arrowsize=1.2,
+                        arrowwidth=2,
+                        arrowcolor='gray',
+                        showarrow=True,
+                    )
             
             fig.update_layout(
                 title="工艺流程拓扑",
