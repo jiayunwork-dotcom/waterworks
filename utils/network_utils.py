@@ -567,3 +567,223 @@ def compute_network_layout(nodes_df, pipes_df):
             pos[node] = (i % 5, i // 5)
 
     return pos
+
+
+CANDIDATE_DIAMETERS = [100, 150, 200, 250, 300, 350, 400, 450, 500]
+
+
+def calculate_pipe_cost(diameter_mm, length_m):
+    """
+    计算单条管段的管材费用
+    单价 = 0.5 * 管径(mm) 元/m
+    """
+    unit_price = 0.5 * diameter_mm
+    return unit_price * length_m
+
+
+def calculate_total_cost(pipes_df):
+    """
+    计算管网管材总费用
+    """
+    total_cost = 0.0
+    for _, row in pipes_df.iterrows():
+        total_cost += calculate_pipe_cost(row['管径(mm)'], row['管长(m)'])
+    return total_cost
+
+
+def decode_chromosome(chromosome, pipes_df):
+    """
+    将染色体（管径索引数组）解码为管段DataFrame
+    """
+    pipes_copy = pipes_df.copy()
+    for i, idx in enumerate(chromosome):
+        pipes_copy.loc[i, '管径(mm)'] = CANDIDATE_DIAMETERS[idx]
+    return pipes_copy
+
+
+def evaluate_fitness(chromosome, nodes_df, pipes_df, min_pressure, max_iter=500, tol=0.001):
+    """
+    计算个体适应度
+    满足约束: 适应度 = 1 / 总费用
+    不满足约束: 适应度 = 0
+    """
+    pipes_decoded = decode_chromosome(chromosome, pipes_df)
+    result = hardy_cross_calculation(nodes_df, pipes_decoded, max_iter=max_iter, tol=tol)
+
+    if not result['converged']:
+        return 0.0, float('inf')
+
+    for nr in result['node_results']:
+        if nr['类型'] == '需求' and nr['压力(m)'] < min_pressure:
+            return 0.0, float('inf')
+
+    total_cost = calculate_total_cost(pipes_decoded)
+    fitness = 1.0 / total_cost if total_cost > 0 else 0.0
+    return fitness, total_cost
+
+
+def tournament_selection(population, fitnesses, tournament_size=3):
+    """
+    锦标赛选择
+    """
+    n = len(population)
+    selected = []
+    for _ in range(n):
+        candidates_idx = np.random.choice(n, tournament_size, replace=False)
+        best_idx = candidates_idx[0]
+        for idx in candidates_idx:
+            if fitnesses[idx] > fitnesses[best_idx]:
+                best_idx = idx
+        selected.append(population[best_idx].copy())
+    return selected
+
+
+def single_point_crossover(parent1, parent2, crossover_rate):
+    """
+    单点交叉
+    """
+    if np.random.random() > crossover_rate:
+        return parent1.copy(), parent2.copy()
+
+    n = len(parent1)
+    if n <= 1:
+        return parent1.copy(), parent2.copy()
+
+    point = np.random.randint(1, n)
+    child1 = np.concatenate([parent1[:point], parent2[point:]])
+    child2 = np.concatenate([parent2[:point], parent1[point:]])
+    return child1, child2
+
+
+def mutate(chromosome, mutation_rate):
+    """
+    变异：随机将某个基因位替换为候选管径列表中的随机值
+    """
+    mutated = chromosome.copy()
+    n = len(mutated)
+    n_choices = len(CANDIDATE_DIAMETERS)
+
+    for i in range(n):
+        if np.random.random() < mutation_rate:
+            mutated[i] = np.random.randint(0, n_choices)
+
+    return mutated
+
+
+def initialize_population(pop_size, n_pipes):
+    """
+    初始化种群
+    """
+    n_choices = len(CANDIDATE_DIAMETERS)
+    population = []
+    for _ in range(pop_size):
+        chromosome = np.random.randint(0, n_choices, size=n_pipes)
+        population.append(chromosome)
+    return population
+
+
+def genetic_algorithm_optimization(nodes_df, pipes_df, min_pressure=15.0,
+                                    pop_size=50, max_generations=100,
+                                    crossover_rate=0.8, mutation_rate=0.1,
+                                    tournament_size=3, max_iter_hc=500, tol_hc=0.001,
+                                    progress_callback=None):
+    """
+    遗传算法求解管径优化问题
+
+    参数:
+        nodes_df: 节点DataFrame
+        pipes_df: 管段DataFrame
+        min_pressure: 最低压力阈值 (m)
+        pop_size: 种群大小
+        max_generations: 最大迭代代数
+        crossover_rate: 交叉率
+        mutation_rate: 变异率
+        tournament_size: 锦标赛选择规模
+        max_iter_hc: Hardy-Cross最大迭代次数
+        tol_hc: Hardy-Cross收敛阈值
+        progress_callback: 进度回调函数 callback(generation, best_cost)
+
+    返回:
+        dict 包含优化结果
+    """
+    n_pipes = len(pipes_df)
+    n_choices = len(CANDIDATE_DIAMETERS)
+
+    population = initialize_population(pop_size, n_pipes)
+
+    best_fitness_history = []
+    best_cost_history = []
+    best_solution = None
+    best_cost = float('inf')
+    best_fitness = 0.0
+
+    for gen in range(max_generations):
+        fitnesses = []
+        costs = []
+        for chromosome in population:
+            fitness, cost = evaluate_fitness(
+                chromosome, nodes_df, pipes_df, min_pressure,
+                max_iter=max_iter_hc, tol=tol_hc
+            )
+            fitnesses.append(fitness)
+            costs.append(cost)
+
+        fitnesses = np.array(fitnesses)
+        costs = np.array(costs)
+
+        best_idx = np.argmax(fitnesses)
+        current_best_fitness = fitnesses[best_idx]
+        current_best_cost = costs[best_idx]
+
+        if current_best_fitness > best_fitness:
+            best_fitness = current_best_fitness
+            best_cost = current_best_cost
+            best_solution = population[best_idx].copy()
+
+        best_fitness_history.append(best_fitness)
+        best_cost_history.append(best_cost)
+
+        if progress_callback is not None:
+            progress_callback(gen + 1, best_cost)
+
+        if np.all(fitnesses == 0):
+            new_population = initialize_population(pop_size, n_pipes)
+        else:
+            selected = tournament_selection(population, fitnesses, tournament_size)
+
+            new_population = []
+            for i in range(0, pop_size, 2):
+                parent1 = selected[i]
+                parent2 = selected[min(i + 1, pop_size - 1)]
+                child1, child2 = single_point_crossover(parent1, parent2, crossover_rate)
+                child1 = mutate(child1, mutation_rate)
+                child2 = mutate(child2, mutation_rate)
+                new_population.append(child1)
+                if len(new_population) < pop_size:
+                    new_population.append(child2)
+
+            if len(new_population) > pop_size:
+                new_population = new_population[:pop_size]
+
+        population = new_population
+
+    if best_solution is not None:
+        best_pipes = decode_chromosome(best_solution, pipes_df)
+        best_result = hardy_cross_calculation(nodes_df, best_pipes, max_iter=max_iter_hc, tol=tol_hc)
+    else:
+        best_pipes = pipes_df.copy()
+        best_result = None
+
+    return {
+        'best_pipes': best_pipes,
+        'best_cost': best_cost,
+        'best_fitness': best_fitness,
+        'best_hydraulic_result': best_result,
+        'cost_history': best_cost_history,
+        'fitness_history': best_fitness_history,
+        'generations': max_generations,
+        'pop_size': pop_size,
+        'crossover_rate': crossover_rate,
+        'mutation_rate': mutation_rate,
+        'min_pressure': min_pressure,
+    }

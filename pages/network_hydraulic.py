@@ -16,6 +16,10 @@ from utils.network_utils import (
     calculate_water_quality,
     sensitivity_analysis,
     compute_network_layout,
+    genetic_algorithm_optimization,
+    calculate_total_cost,
+    calculate_pipe_cost,
+    CANDIDATE_DIAMETERS,
 )
 
 
@@ -33,8 +37,10 @@ if 'hydraulic_results' not in st.session_state:
     st.session_state.hydraulic_results = None
 if 'water_quality_results' not in st.session_state:
     st.session_state.water_quality_results = None
+if 'optimization_results' not in st.session_state:
+    st.session_state.optimization_results = None
 
-tab1, tab2, tab3, tab4 = st.tabs(["📐 管网拓扑定义", "💧 水力计算", "🧪 水质衰减耦合", "📊 敏感性分析"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📐 管网拓扑定义", "💧 水力计算", "🧪 水质衰减耦合", "📊 敏感性分析", "⚙️ 管径优化"])
 
 with tab1:
     st.subheader("节点配置")
@@ -942,3 +948,324 @@ with tab4:
                             st.metric("目标指标变化幅度", f"{sensitivity:.4f} {unit}")
                     else:
                         st.warning("敏感性分析未产生有效结果")
+
+with tab5:
+    st.subheader("管径优化调度 (遗传算法)")
+
+    nodes_df = st.session_state.network_nodes
+    pipes_df = st.session_state.network_pipes
+    hydraulic_results = st.session_state.hydraulic_results
+
+    if hydraulic_results is None:
+        st.info('⚠️ 请先在"水力计算"页签中完成水力计算，再进行管径优化')
+    elif len(nodes_df) == 0 or len(pipes_df) == 0:
+        st.info('请先在"管网拓扑定义"页签中配置管网结构')
+    else:
+        errors = validate_network(nodes_df, pipes_df)
+        if errors:
+            for e in errors:
+                st.error(e)
+            st.warning("请修正以上错误后再进行优化")
+        else:
+            st.markdown("""
+            **优化目标：** 在满足所有需求节点最低压力约束的前提下，找到管材总费用最低的管径组合方案。
+
+            **候选管径：** [100, 150, 200, 250, 300, 350, 400, 450, 500] mm
+
+            **费用公式：** 每米费用 = 0.5 × 管径(mm) 元/m
+            """)
+
+            st.divider()
+            st.markdown("##### 优化参数设置")
+
+            col_opt1, col_opt2 = st.columns(2)
+            with col_opt1:
+                min_pressure = st.number_input(
+                    "最低压力阈值 (m)",
+                    min_value=0.0,
+                    value=15.0,
+                    step=1.0,
+                    help="所有需求节点的水力计算压力必须不低于此值",
+                )
+                pop_size = st.number_input(
+                    "种群大小",
+                    min_value=10,
+                    max_value=500,
+                    value=50,
+                    step=10,
+                )
+                max_generations = st.number_input(
+                    "最大迭代代数",
+                    min_value=10,
+                    max_value=500,
+                    value=100,
+                    step=10,
+                )
+            with col_opt2:
+                crossover_rate = st.slider(
+                    "交叉率",
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=0.8,
+                    step=0.05,
+                )
+                mutation_rate = st.slider(
+                    "变异率",
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=0.1,
+                    step=0.01,
+                )
+
+            st.divider()
+
+            if st.button("🚀 开始优化", type="primary", use_container_width=True):
+                original_cost = calculate_total_cost(pipes_df)
+                st.session_state.original_pipe_cost = original_cost
+
+                progress_bar = st.progress(0, text="正在初始化种群...")
+                status_text = st.empty()
+
+                def update_progress(gen, best_cost):
+                    pct = gen / max_generations
+                    progress_bar.progress(pct, text=f"第 {gen}/{max_generations} 代")
+                    if best_cost < float('inf'):
+                        status_text.info(f"当前最优费用: {best_cost:,.2f} 元")
+
+                with st.spinner("遗传算法优化进行中..."):
+                    opt_result = genetic_algorithm_optimization(
+                        nodes_df, pipes_df,
+                        min_pressure=min_pressure,
+                        pop_size=int(pop_size),
+                        max_generations=int(max_generations),
+                        crossover_rate=crossover_rate,
+                        mutation_rate=mutation_rate,
+                        progress_callback=update_progress,
+                    )
+                    st.session_state.optimization_results = opt_result
+                    progress_bar.progress(1.0, text="优化完成!")
+                    status_text.success("✅ 优化完成!")
+                    st.rerun()
+
+            opt_result = st.session_state.optimization_results
+            if opt_result is not None:
+                st.divider()
+                st.subheader("📊 优化结果")
+
+                original_cost = st.session_state.get('original_pipe_cost', calculate_total_cost(pipes_df))
+                optimized_cost = opt_result['best_cost']
+
+                if optimized_cost == float('inf'):
+                    st.error("❌ 未找到满足压力约束的可行解，请尝试增大管径候选范围或降低最低压力阈值")
+                else:
+                    col_cost1, col_cost2, col_cost3 = st.columns(3)
+                    with col_cost1:
+                        st.metric("优化前总费用", f"{original_cost:,.2f} 元")
+                    with col_cost2:
+                        st.metric("优化后总费用", f"{optimized_cost:,.2f} 元")
+                    with col_cost3:
+                        saving = original_cost - optimized_cost
+                        saving_pct = (saving / original_cost * 100) if original_cost > 0 else 0
+                        st.metric("节约费用", f"{saving:,.2f} 元", f"-{saving_pct:.2f}%", delta_color="inverse")
+
+                    st.divider()
+                    st.subheader("📋 管径方案对比")
+
+                    best_pipes = opt_result['best_pipes']
+                    comparison_data = []
+                    for i in range(len(pipes_df)):
+                        orig_d = pipes_df.loc[i, '管径(mm)']
+                        opt_d = best_pipes.loc[i, '管径(mm)']
+                        length = pipes_df.loc[i, '管长(m)']
+                        unit_price = 0.5 * opt_d
+                        cost = calculate_pipe_cost(opt_d, length)
+                        orig_cost = calculate_pipe_cost(orig_d, length)
+
+                        if opt_d > orig_d:
+                            change = "增大"
+                        elif opt_d < orig_d:
+                            change = "减小"
+                        else:
+                            change = "不变"
+
+                        comparison_data.append({
+                            '管段': f"{pipes_df.loc[i, '起始节点']}→{pipes_df.loc[i, '终止节点']}",
+                            '优化前管径(mm)': int(orig_d),
+                            '优化后管径(mm)': int(opt_d),
+                            '管径变化': change,
+                            '管长(m)': length,
+                            '单价(元/m)': unit_price,
+                            '优化前费用(元)': round(orig_cost, 2),
+                            '优化后费用(元)': round(cost, 2),
+                            '费用变化(元)': round(cost - orig_cost, 2),
+                        })
+
+                    comp_df = pd.DataFrame(comparison_data)
+
+                    def highlight_change(row):
+                        if row['管径变化'] == '增大':
+                            return ['background-color: #f8d7da; color: #721c24'] * len(row)
+                        elif row['管径变化'] == '减小':
+                            return ['background-color: #d4edda; color: #155724'] * len(row)
+                        else:
+                            return [''] * len(row)
+
+                    styled_comp = comp_df.style.apply(highlight_change, axis=1)
+                    st.dataframe(styled_comp, use_container_width=True, hide_index=True)
+
+                    st.divider()
+                    st.subheader("📈 收敛曲线")
+
+                    cost_history = opt_result['cost_history']
+                    valid_costs = [c for c in cost_history if c < float('inf')]
+                    generations = list(range(1, len(cost_history) + 1))
+
+                    fig_conv = go.Figure()
+                    fig_conv.add_trace(go.Scatter(
+                        x=generations,
+                        y=cost_history,
+                        mode='lines+markers',
+                        line=dict(color='blue', width=2),
+                        marker=dict(size=4),
+                        name='最优费用',
+                    ))
+                    fig_conv.update_layout(
+                        title="遗传算法收敛曲线",
+                        xaxis_title="迭代代数",
+                        yaxis_title="最优管材总费用 (元)",
+                        height=400,
+                        hovermode='x unified',
+                    )
+                    st.plotly_chart(fig_conv, use_container_width=True)
+
+                    st.divider()
+                    st.subheader("🗺️ 管径变化拓扑图")
+
+                    pos = compute_network_layout(nodes_df, pipes_df)
+
+                    fig_opt = go.Figure()
+
+                    for i, row in pipes_df.iterrows():
+                        start = row['起始节点']
+                        end = row['终止节点']
+                        if start in pos and end in pos:
+                            x0, y0 = pos[start]
+                            x1, y1 = pos[end]
+                            orig_d = row['管径(mm)']
+                            opt_d = best_pipes.loc[i, '管径(mm)']
+
+                            if opt_d > orig_d:
+                                line_color = '#DC3545'
+                                status_text = '管径增大'
+                            elif opt_d < orig_d:
+                                line_color = '#28A745'
+                                status_text = '管径减小'
+                            else:
+                                line_color = '#6C757D'
+                                status_text = '管径不变'
+
+                            line_width = 3 + (opt_d / 500) * 5
+
+                            fig_opt.add_trace(go.Scatter(
+                                x=[x0, x1],
+                                y=[y0, y1],
+                                mode='lines',
+                                line=dict(color=line_color, width=line_width),
+                                hoverinfo='text',
+                                hovertext=(
+                                    f"{start}→{end}<br>"
+                                    f"优化前: DN{int(orig_d)}mm<br>"
+                                    f"优化后: DN{int(opt_d)}mm<br>"
+                                    f"状态: {status_text}"
+                                ),
+                                showlegend=False,
+                            ))
+
+                    legend_items = [
+                        ('管径增大', '#DC3545', 'line'),
+                        ('管径减小', '#28A745', 'line'),
+                        ('管径不变', '#6C757D', 'line'),
+                    ]
+                    for name, color, mode in legend_items:
+                        fig_opt.add_trace(go.Scatter(
+                            x=[None], y=[None],
+                            mode='lines',
+                            line=dict(color=color, width=4),
+                            name=name,
+                            showlegend=True,
+                        ))
+
+                    for _, row in nodes_df.iterrows():
+                        name = row['节点名称']
+                        if name in pos:
+                            x, y = pos[name]
+                            is_source = row['类型'] == '水源'
+                            color = 'blue' if is_source else 'green'
+                            size = 16
+
+                            label = f"{name}"
+                            if is_source:
+                                label += f"<br>水源"
+
+                            fig_opt.add_trace(go.Scatter(
+                                x=[x],
+                                y=[y],
+                                mode='markers+text',
+                                marker=dict(size=size, color=color,
+                                            line=dict(color='white', width=2)),
+                                text=[label],
+                                textposition='bottom center',
+                                textfont=dict(size=10),
+                                hoverinfo='text',
+                                showlegend=False,
+                            ))
+
+                    fig_opt.update_layout(
+                        title="管网管径变化分布图",
+                        xaxis=dict(showticklabels=False, showgrid=False, zeroline=False),
+                        yaxis=dict(showticklabels=False, showgrid=False, zeroline=False,
+                                   scaleanchor='x', scaleratio=1),
+                        height=550,
+                        margin=dict(l=20, r=20, t=50, b=20),
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        plot_bgcolor='rgba(0,0,0,0)',
+                        legend=dict(
+                            x=0,
+                            y=1,
+                            bgcolor='rgba(255,255,255,0.8)',
+                        ),
+                    )
+                    st.plotly_chart(fig_opt, use_container_width=True)
+
+                    st.divider()
+                    st.subheader("💧 优化后水力校核")
+
+                    hc_result = opt_result['best_hydraulic_result']
+                    if hc_result is not None:
+                        if hc_result['converged']:
+                            st.success(f"✅ 水力校核收敛，共迭代 {hc_result['iterations']} 次")
+                        else:
+                            st.warning("⚠️ 水力校核未收敛")
+
+                        node_res_df = pd.DataFrame(hc_result['node_results'])
+                        demand_nodes = node_res_df[node_res_df['类型'] == '需求']
+
+                        if not demand_nodes.empty:
+                            min_p = demand_nodes['压力(m)'].min()
+                            min_p_node = demand_nodes.loc[demand_nodes['压力(m)'].idxmin(), '节点名称']
+
+                            col_p1, col_p2 = st.columns(2)
+                            with col_p1:
+                                st.metric("最低压力节点", min_p_node)
+                            with col_p2:
+                                st.metric("最低压力值", f"{min_p:.3f} m", delta=f"≥{min_pressure}m")
+
+                            if min_p >= min_pressure:
+                                st.success("✅ 所有需求节点压力均满足约束")
+                            else:
+                                st.error(f"❌ 节点 {min_p_node} 压力不满足约束 ({min_p:.3f}m < {min_pressure}m)")
+
+                        display_node = node_res_df[['节点名称', '类型', '水头(m)', '压力(m)', '用水量(m³/h)']].copy()
+                        display_node['水头(m)'] = display_node['水头(m)'].round(3)
+                        display_node['压力(m)'] = display_node['压力(m)'].round(3)
+                        st.dataframe(display_node, use_container_width=True, hide_index=True)
