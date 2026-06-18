@@ -5,6 +5,8 @@ import plotly.graph_objects as go
 import plotly.express as px
 import os
 import sys
+import json
+import io
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -245,6 +247,96 @@ with tab1:
     else:
         st.info("请添加节点和管段后查看管网拓扑图")
 
+    st.divider()
+    st.subheader("📤 管网拓扑导入导出")
+
+    col_export, col_import = st.columns(2)
+
+    with col_export:
+        st.markdown("##### 导出当前管网")
+        if len(st.session_state.network_nodes) > 0 or len(st.session_state.network_pipes) > 0:
+            export_data = {
+                'nodes': st.session_state.network_nodes.to_dict('records'),
+                'pipes': st.session_state.network_pipes.to_dict('records'),
+            }
+            json_str = json.dumps(export_data, ensure_ascii=False, indent=2)
+            st.download_button(
+                label="💾 导出为JSON文件",
+                data=json_str,
+                file_name="network_topology.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+        else:
+            st.info("暂无管网数据可导出")
+
+    with col_import:
+        st.markdown("##### 导入管网")
+        uploaded_file = st.file_uploader("选择JSON文件", type=['json'], key="network_import")
+        if uploaded_file is not None:
+            try:
+                bytes_data = uploaded_file.read()
+                data = json.load(io.BytesIO(bytes_data))
+
+                required_node_fields = ['节点名称', '类型', '用水量(m³/h)', '水头(m)', '地面标高(m)']
+                required_pipe_fields = ['起始节点', '终止节点', '管径(mm)', '管长(m)', '粗糙系数']
+
+                errors = []
+                if 'nodes' not in data:
+                    errors.append("JSON文件缺少 'nodes' 字段")
+                else:
+                    if not isinstance(data['nodes'], list):
+                        errors.append("'nodes' 字段必须是数组类型")
+                    else:
+                        for i, node in enumerate(data['nodes']):
+                            if not isinstance(node, dict):
+                                errors.append(f"nodes[{i}] 必须是对象类型")
+                            else:
+                                for field in required_node_fields:
+                                    if field not in node:
+                                        errors.append(f"nodes[{i}] 缺少必要字段: '{field}'")
+
+                if 'pipes' not in data:
+                    errors.append("JSON文件缺少 'pipes' 字段")
+                else:
+                    if not isinstance(data['pipes'], list):
+                        errors.append("'pipes' 字段必须是数组类型")
+                    else:
+                        for i, pipe in enumerate(data['pipes']):
+                            if not isinstance(pipe, dict):
+                                errors.append(f"pipes[{i}] 必须是对象类型")
+                            else:
+                                for field in required_pipe_fields:
+                                    if field not in pipe:
+                                        errors.append(f"pipes[{i}] 缺少必要字段: '{field}'")
+
+                if errors:
+                    st.error("❌ 导入失败，存在以下错误：")
+                    for err in errors:
+                        st.error(f"  - {err}")
+                else:
+                    if st.button("✅ 确认导入并替换当前管网", use_container_width=True, type="primary"):
+                        new_nodes = pd.DataFrame(data['nodes'])
+                        new_pipes = pd.DataFrame(data['pipes'])
+
+                        validate_errors = validate_network(new_nodes, new_pipes)
+                        if validate_errors:
+                            st.error("❌ 管网拓扑校验失败：")
+                            for err in validate_errors:
+                                st.error(f"  - {err}")
+                        else:
+                            st.session_state.network_nodes = new_nodes
+                            st.session_state.network_pipes = new_pipes
+                            st.session_state.hydraulic_results = None
+                            st.session_state.water_quality_results = None
+                            st.success(f"✅ 导入成功！共 {len(new_nodes)} 个节点，{len(new_pipes)} 条管段")
+                            st.rerun()
+
+            except json.JSONDecodeError as e:
+                st.error(f"❌ JSON格式解析失败: {str(e)}")
+            except Exception as e:
+                st.error(f"❌ 导入失败: {str(e)}")
+
 with tab2:
     st.subheader("稳态水力计算 (Hardy-Cross法)")
 
@@ -281,6 +373,39 @@ with tab2:
                     st.session_state.hydraulic_results = result
                     st.session_state.water_quality_results = None
 
+                    pipe_results_df = pd.DataFrame(result['pipe_results'])
+                    if not pipe_results_df.empty:
+                        pipe_results_df['流速状态'] = pipe_results_df['流速(m/s)'].apply(
+                            lambda v: '滞流风险' if v < 0.3 else ('冲刷风险' if v > 2.5 else '正常')
+                        )
+                        min_velocity_row = pipe_results_df.loc[pipe_results_df['流速(m/s)'].idxmin()]
+                        pipe_id = f"{min_velocity_row['起始节点']}→{min_velocity_row['终止节点']}"
+                        min_velocity = min_velocity_row['流速(m/s)']
+                        pipe_len = min_velocity_row['管长(m)']
+                        travel_time_h = (pipe_len / (min_velocity * 3600)) if min_velocity > 0 else 9999.0
+
+                        node_results_df = pd.DataFrame(result['node_results'])
+                        demand_nodes = node_results_df[node_results_df['类型'] == '需求']
+                        if not demand_nodes.empty:
+                            min_pressure_row = demand_nodes.loc[demand_nodes['压力(m)'].idxmin()]
+                            min_pressure_node = min_pressure_row['节点名称']
+                            min_pressure = min_pressure_row['压力(m)']
+                        else:
+                            min_pressure_node = 'N/A'
+                            min_pressure = 0.0
+
+                        st.session_state.network_hydraulic_summary = {
+                            'min_velocity_pipe': {
+                                'pipe_id': pipe_id,
+                                'velocity': float(min_velocity),
+                                'travel_time_h': float(travel_time_h),
+                            },
+                            'min_pressure_node': {
+                                'node_name': min_pressure_node,
+                                'pressure': float(min_pressure),
+                            }
+                        }
+
             result = st.session_state.hydraulic_results
             if result is not None:
                 if result['converged']:
@@ -293,12 +418,36 @@ with tab2:
 
                 pipe_df = pd.DataFrame(result['pipe_results'])
                 if not pipe_df.empty:
+                    pipe_df['流速状态'] = pipe_df['流速(m/s)'].apply(
+                        lambda v: '滞流风险' if v < 0.3 else ('冲刷风险' if v > 2.5 else '正常')
+                    )
                     display_pipe = pipe_df[['起始节点', '终止节点', '管径(mm)', '管长(m)',
-                                             '流量(L/s)', '流速(m/s)', '水头损失(m)']].copy()
+                                             '流量(L/s)', '流速(m/s)', '流速状态', '水头损失(m)']].copy()
                     display_pipe['流量(L/s)'] = display_pipe['流量(L/s)'].round(3)
                     display_pipe['流速(m/s)'] = display_pipe['流速(m/s)'].round(4)
                     display_pipe['水头损失(m)'] = display_pipe['水头损失(m)'].round(4)
-                    st.dataframe(display_pipe, use_container_width=True, hide_index=True)
+
+                    def highlight_velocity_status(val):
+                        if val == '滞流风险':
+                            return 'background-color: #fff3cd; color: #856404'
+                        elif val == '冲刷风险':
+                            return 'background-color: #f8d7da; color: #721c24'
+                        else:
+                            return 'background-color: #d4edda; color: #155724'
+
+                    styled_pipe = display_pipe.style.applymap(
+                        highlight_velocity_status, subset=['流速状态']
+                    )
+                    st.dataframe(styled_pipe, use_container_width=True, hide_index=True)
+
+                    stagnant = pipe_df[pipe_df['流速状态'] == '滞流风险']
+                    scouring = pipe_df[pipe_df['流速状态'] == '冲刷风险']
+                    if not stagnant.empty:
+                        stagnant_pipes = [f"{r['起始节点']}→{r['终止节点']}" for _, r in stagnant.iterrows()]
+                        st.warning(f"⚠️ 滞流风险管段 ({len(stagnant)}条，流速<0.3m/s): {', '.join(stagnant_pipes)}")
+                    if not scouring.empty:
+                        scouring_pipes = [f"{r['起始节点']}→{r['终止节点']}" for _, r in scouring.iterrows()]
+                        st.error(f"🚨 冲刷风险管段 ({len(scouring)}条，流速>2.5m/s): {', '.join(scouring_pipes)}")
 
                 st.divider()
                 st.subheader("节点计算结果")
@@ -330,6 +479,13 @@ with tab2:
                 d_min = min(diameters)
                 d_max = max(diameters)
 
+                pipe_velocity_map = {}
+                for pr in result['pipe_results']:
+                    key = f"{pr['起始节点']}→{pr['终止节点']}"
+                    pipe_velocity_map[key] = pr['流速(m/s)']
+
+                legend_added = {'normal': False, 'stagnant': False, 'scouring': False}
+
                 for _, row in pipes_df.iterrows():
                     start = row['起始节点']
                     end = row['终止节点']
@@ -341,14 +497,43 @@ with tab2:
                             line_width = 1.5 + 5 * (d - d_min) / (d_max - d_min)
                         else:
                             line_width = 3
+
+                        key_fwd = f"{start}→{end}"
+                        key_rev = f"{end}→{start}"
+                        velocity = pipe_velocity_map.get(key_fwd, pipe_velocity_map.get(key_rev, 0))
+
+                        if velocity < 0.3:
+                            line_color = '#FFC107'
+                            line_dash = 'dash'
+                            status_text = '⚠️ 滞流风险'
+                            legend_name = '滞流风险 (<0.3m/s)'
+                            legend_key = 'stagnant'
+                        elif velocity > 2.5:
+                            line_color = '#DC3545'
+                            line_dash = 'dash'
+                            status_text = '🚨 冲刷风险'
+                            legend_name = '冲刷风险 (>2.5m/s)'
+                            legend_key = 'scouring'
+                        else:
+                            line_color = '#888888'
+                            line_dash = 'solid'
+                            status_text = '正常'
+                            legend_name = '正常管段'
+                            legend_key = 'normal'
+
+                        show_legend = not legend_added[legend_key]
+                        if show_legend:
+                            legend_added[legend_key] = True
+
                         fig.add_trace(go.Scatter(
                             x=[x0, x1],
                             y=[y0, y1],
                             mode='lines',
-                            line=dict(color='#888888', width=line_width),
+                            line=dict(color=line_color, width=line_width, dash=line_dash),
                             hoverinfo='text',
-                            hovertext=f"{start} → {end}<br>管径: {d} mm",
-                            showlegend=False,
+                            hovertext=f"{start} → {end}<br>管径: {d} mm<br>流速: {velocity:.4f} m/s<br>状态: {status_text}",
+                            showlegend=show_legend,
+                            name=legend_name,
                         ))
 
                 pressure_values = []
@@ -392,14 +577,19 @@ with tab2:
                 ))
 
                 fig.update_layout(
-                    title="管网压力分布（绿色=高压，红色=低压）",
+                    title="管网压力分布（绿色=高压，红色=低压）<br><span style='font-size:12px;color:gray'>黄色虚线=滞流风险，红色虚线=冲刷风险</span>",
                     xaxis=dict(showticklabels=False, showgrid=False, zeroline=False),
                     yaxis=dict(showticklabels=False, showgrid=False, zeroline=False,
                                scaleanchor='x', scaleratio=1),
                     height=550,
-                    margin=dict(l=20, r=80, t=50, b=20),
+                    margin=dict(l=20, r=80, t=70, b=20),
                     paper_bgcolor='rgba(0,0,0,0)',
                     plot_bgcolor='rgba(0,0,0,0)',
+                    legend=dict(
+                        x=0,
+                        y=1,
+                        bgcolor='rgba(255,255,255,0.8)',
+                    ),
                 )
                 st.plotly_chart(fig, use_container_width=True)
 

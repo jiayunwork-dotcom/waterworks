@@ -235,6 +235,39 @@ else:
                         st.caption(f"历史相似工况实际投药量范围: {actual_dosages.min():.2f} ~ {actual_dosages.max():.2f} mg/L，均值: {actual_dosages.mean():.2f} mg/L")
                     else:
                         st.warning("未找到足够的历史数据进行相似工况匹配。")
+
+                    if 'network_hydraulic_summary' in st.session_state and st.session_state.network_hydraulic_summary is not None:
+                        st.divider()
+                        st.subheader("📢 管网水力风险提示")
+
+                        summary = st.session_state.network_hydraulic_summary
+                        min_vel_pipe = summary.get('min_velocity_pipe', {})
+                        min_press_node = summary.get('min_pressure_node', {})
+
+                        col_r1, col_r2 = st.columns(2)
+                        with col_r1:
+                            st.info(f"""
+                            **最低流速管段**
+                            - 管段编号: {min_vel_pipe.get('pipe_id', 'N/A')}
+                            - 流速值: {min_vel_pipe.get('velocity', 0):.4f} m/s
+                            - 停留时间: {min_vel_pipe.get('travel_time_h', 0):.4f} 小时
+                            """)
+                        with col_r2:
+                            st.info(f"""
+                            **最低压力节点**
+                            - 节点名称: {min_press_node.get('node_name', 'N/A')}
+                            - 压力值: {min_press_node.get('pressure', 0):.2f} m
+                            """)
+
+                        vel_warning = min_vel_pipe.get('velocity', 0) < 0.3
+                        press_warning = min_press_node.get('pressure', 0) < 10
+                        if vel_warning or press_warning:
+                            warning_msg = []
+                            if vel_warning:
+                                warning_msg.append("最低流速低于0.3m/s，存在滞流风险")
+                            if press_warning:
+                                warning_msg.append("最低压力低于10m，存在供水不足风险")
+                            st.warning("⚠️ " + "；".join(warning_msg))
             else:
                 st.info("请先在'模型训练与对比'标签页中训练模型。")
         
