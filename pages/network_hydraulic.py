@@ -100,10 +100,11 @@ with tab1:
                 else:
                     existing = st.session_state.network_pipes
                     dup = existing[
-                        (existing['起始节点'] == new_pipe_start) & (existing['终止节点'] == new_pipe_end)
+                        ((existing['起始节点'] == new_pipe_start) & (existing['终止节点'] == new_pipe_end)) |
+                        ((existing['起始节点'] == new_pipe_end) & (existing['终止节点'] == new_pipe_start))
                     ]
                     if not dup.empty:
-                        st.warning(f"管段 {new_pipe_start} → {new_pipe_end} 已存在")
+                        st.warning(f'节点 {new_pipe_start} 与 {new_pipe_end} 之间已存在管段，不可重复添加')
                     else:
                         new_row = pd.DataFrame([{
                             '起始节点': new_pipe_start,
@@ -209,8 +210,7 @@ with tab1:
                     x, y = pos[name]
                     is_source = row['类型'] == '水源'
                     color = 'blue' if is_source else 'green'
-                    symbol = 'diamond' if is_source else 'circle'
-                    size = 18 if is_source else 14
+                    size = 16
 
                     label = f"{name}"
                     if is_source:
@@ -222,7 +222,7 @@ with tab1:
                         x=[x],
                         y=[y],
                         mode='markers+text',
-                        marker=dict(size=size, color=color, symbol=symbol,
+                        marker=dict(size=size, color=color,
                                     line=dict(color='white', width=2)),
                         text=[label],
                         textposition='bottom center',
@@ -652,7 +652,10 @@ with tab4:
             range_pct = st.slider("变化范围 (%)", min_value=5, max_value=50, value=20, step=5)
             step_pct = st.slider("步长 (%)", min_value=1, max_value=10, value=5)
 
-            if param_original and param_original > 0:
+            if param_type == "用水量" and param_original == 0:
+                param_range = np.array([])
+                st.warning('所选节点用水量为 0，无法进行敏感性分析。请选择用水量大于 0 的需求节点，或先在管网拓扑定义中为该节点设置用水量。')
+            elif param_original and param_original > 0:
                 p_low = param_original * (1 - range_pct / 100.0)
                 p_high = param_original * (1 + range_pct / 100.0)
                 step = param_original * step_pct / 100.0
