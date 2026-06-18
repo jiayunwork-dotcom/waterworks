@@ -133,6 +133,7 @@ else:
                 fit_result = fit_decay_model(chlorine_data, retention_hours)
                 
                 if fit_result:
+                    st.session_state['chlorine_decay_k'] = fit_result['k']
                     col1, col2, col3 = st.columns(3)
                     with col1:
                         st.metric("初始余氯 C₀", f"{fit_result['C0']:.3f} mg/L")

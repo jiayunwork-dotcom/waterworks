@@ -37,6 +37,7 @@ page = st.sidebar.radio(
         "数据导入与工艺概览",
         "投药量预测模型",
         "余氯衰减与CT值计算",
+        "管网水力模型仿真",
         "水质达标监控",
         "工艺参数关联分析",
         "能耗分析",
@@ -260,6 +261,9 @@ if page == "数据导入与工艺概览":
 
 elif page == "投药量预测模型":
     exec(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pages', 'model_prediction.py'), encoding='utf-8').read())
+
+elif page == "管网水力模型仿真":
+    exec(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pages', 'network_hydraulic.py'), encoding='utf-8').read())
 
 elif page == "余氯衰减与CT值计算":
     exec(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pages', 'chlorine_ct.py'), encoding='utf-8').read())
