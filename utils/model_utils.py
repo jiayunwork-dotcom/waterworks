@@ -4,6 +4,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from sklearn.preprocessing import StandardScaler
 import xgboost as xgb
 import pickle
 import os
@@ -167,6 +168,8 @@ def save_model(model_result, version_dir='models'):
         'train_metrics': model_result['train_metrics'],
         'test_metrics': model_result['test_metrics'],
         'residuals': model_result['residuals'].tolist() if hasattr(model_result['residuals'], 'tolist') else model_result['residuals'],
+        'y_test': model_result['y_test'].tolist() if hasattr(model_result['y_test'], 'tolist') else model_result['y_test'],
+        'y_test_pred': model_result['y_test_pred'].tolist() if hasattr(model_result['y_test_pred'], 'tolist') else model_result['y_test_pred'],
         'timestamp': timestamp,
     }
     
@@ -196,9 +199,74 @@ def load_model_versions(version_dir='models'):
                 'timestamp': data.get('timestamp', ''),
                 'train_metrics': data.get('train_metrics', {}),
                 'test_metrics': data.get('test_metrics', {}),
+                'y_test': data.get('y_test', []),
+                'y_test_pred': data.get('y_test_pred', []),
                 'data': data,
             })
         except Exception:
             continue
     
     return versions
+
+
+def get_feature_importance(model_result):
+    model = model_result['model']
+    model_type = model_result['model_type']
+    feature_cols = model_result['feature_cols']
+    
+    if model_type in ['random_forest', 'xgboost']:
+        importances = model.feature_importances_
+        importance_df = pd.DataFrame({
+            'feature': feature_cols,
+            'importance': importances,
+        })
+        importance_df = importance_df.sort_values('importance', ascending=True).reset_index(drop=True)
+        return {
+            'type': 'importance',
+            'data': importance_df,
+        }
+    elif model_type == 'linear':
+        coefs = model.coef_
+        coef_df = pd.DataFrame({
+            'feature': feature_cols,
+            'coefficient': coefs,
+            'abs_coefficient': np.abs(coefs),
+        })
+        coef_df = coef_df.sort_values('abs_coefficient', ascending=True).reset_index(drop=True)
+        return {
+            'type': 'coefficient',
+            'data': coef_df,
+        }
+    else:
+        return None
+
+
+def find_similar_conditions(df, features, feature_cols, top_k=5):
+    if df is None or len(df) == 0:
+        return None
+    
+    available_cols = [c for c in feature_cols if c in df.columns]
+    if len(available_cols) != len(feature_cols):
+        return None
+    
+    data = df[available_cols + [TARGET_COL_CN]].copy()
+    for col in available_cols + [TARGET_COL_CN]:
+        data[col] = pd.to_numeric(data[col], errors='coerce')
+    data = data.dropna()
+    
+    if len(data) == 0:
+        return None
+    
+    scaler = StandardScaler()
+    historical_scaled = scaler.fit_transform(data[available_cols])
+    
+    input_df = pd.DataFrame([[features[c] for c in available_cols]], columns=available_cols)
+    input_scaled = scaler.transform(input_df)
+    
+    distances = np.sqrt(np.sum((historical_scaled - input_scaled) ** 2, axis=1))
+    
+    data['distance'] = distances
+    similar_records = data.sort_values('distance', ascending=True).head(top_k).copy()
+    similar_records['distance'] = similar_records['distance'].round(2)
+    
+    return similar_records[available_cols + [TARGET_COL_CN, 'distance']]
