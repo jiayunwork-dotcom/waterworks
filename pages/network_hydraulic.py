@@ -7,6 +7,7 @@ import os
 import sys
 import json
 import io
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -39,6 +40,8 @@ if 'water_quality_results' not in st.session_state:
     st.session_state.water_quality_results = None
 if 'optimization_results' not in st.session_state:
     st.session_state.optimization_results = None
+if 'optimization_history' not in st.session_state:
+    st.session_state.optimization_history = []
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📐 管网拓扑定义", "💧 水力计算", "🧪 水质衰减耦合", "📊 敏感性分析", "⚙️ 管径优化"])
 
@@ -1043,6 +1046,30 @@ with tab5:
                         progress_callback=update_progress,
                     )
                     st.session_state.optimization_results = opt_result
+
+                    if opt_result['best_cost'] < float('inf'):
+                        hc_res = opt_result['best_hydraulic_result']
+                        opt_min_pressure = 0.0
+                        if hc_res is not None:
+                            demand_nr = [nr for nr in hc_res['node_results'] if nr['类型'] == '需求']
+                            if demand_nr:
+                                opt_min_pressure = min(nr['压力(m)'] for nr in demand_nr)
+
+                        history_entry = {
+                            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                            'best_cost': opt_result['best_cost'],
+                            'original_cost': original_cost,
+                            'saving_pct': ((original_cost - opt_result['best_cost']) / original_cost * 100) if original_cost > 0 else 0,
+                            'min_pressure': opt_min_pressure,
+                            'best_pipes': opt_result['best_pipes'].copy(),
+                            'min_pressure_threshold': min_pressure,
+                            'pop_size': int(pop_size),
+                            'max_generations': int(max_generations),
+                        }
+                        st.session_state.optimization_history.append(history_entry)
+                        if len(st.session_state.optimization_history) > 5:
+                            st.session_state.optimization_history = st.session_state.optimization_history[-5:]
+
                     progress_bar.progress(1.0, text="优化完成!")
                     status_text.success("✅ 优化完成!")
                     st.rerun()
@@ -1050,6 +1077,39 @@ with tab5:
             opt_result = st.session_state.optimization_results
             if opt_result is not None:
                 st.divider()
+
+                optimization_history = st.session_state.get('optimization_history', [])
+                if optimization_history:
+                    with st.expander("📜 历史方案对比", expanded=False):
+                        summary_rows = []
+                        for i, entry in enumerate(optimization_history):
+                            summary_rows.append({
+                                '方案序号': i + 1,
+                                '优化时间': entry['timestamp'],
+                                '总费用(元)': f"{entry['best_cost']:,.2f}",
+                                '节约比例(%)': f"-{entry['saving_pct']:.2f}%",
+                                '最低节点压力(m)': f"{entry['min_pressure']:.3f}",
+                                '种群大小': entry['pop_size'],
+                                '迭代代数': entry['max_generations'],
+                            })
+                        summary_df = pd.DataFrame(summary_rows)
+                        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+                        for i, entry in enumerate(optimization_history):
+                            with st.expander(f"方案 {i + 1} - 详细管径方案 (费用: {entry['best_cost']:,.2f}元)", expanded=False):
+                                bp = entry['best_pipes']
+                                detail_rows = []
+                                for j in range(len(bp)):
+                                    orig_d = pipes_df.loc[j, '管径(mm)']
+                                    opt_d = bp.loc[j, '管径(mm)']
+                                    detail_rows.append({
+                                        '管段': f"{pipes_df.loc[j, '起始节点']}→{pipes_df.loc[j, '终止节点']}",
+                                        '优化前管径(mm)': int(orig_d),
+                                        '优化后管径(mm)': int(opt_d),
+                                        '管长(m)': bp.loc[j, '管长(m)'],
+                                    })
+                                st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
+
                 st.subheader("📊 优化结果")
 
                 original_cost = st.session_state.get('original_pipe_cost', calculate_total_cost(pipes_df))
@@ -1269,3 +1329,145 @@ with tab5:
                         display_node['水头(m)'] = display_node['水头(m)'].round(3)
                         display_node['压力(m)'] = display_node['压力(m)'].round(3)
                         st.dataframe(display_node, use_container_width=True, hide_index=True)
+
+                    st.divider()
+                    st.subheader("📏 约束余量分析")
+
+                    if hc_result is not None:
+                        node_res_df = pd.DataFrame(hc_result['node_results'])
+                        demand_nodes = node_res_df[node_res_df['类型'] == '需求'].copy()
+
+                        if not demand_nodes.empty:
+                            demand_nodes['压力余量(m)'] = demand_nodes['压力(m)'] - min_pressure
+                            demand_nodes = demand_nodes.sort_values('压力余量(m)', ascending=True)
+
+                            bottleneck_nodes = demand_nodes.nsmallest(3, '压力余量(m)')['节点名称'].tolist()
+                            bottleneck_set = set(bottleneck_nodes)
+
+                            fig_margin = go.Figure()
+
+                            colors = ['#DC3545' if name in bottleneck_set else '#4A90D9' for name in demand_nodes['节点名称']]
+
+                            fig_margin.add_trace(go.Bar(
+                                y=demand_nodes['节点名称'].tolist(),
+                                x=demand_nodes['压力余量(m)'].tolist(),
+                                orientation='h',
+                                marker_color=colors,
+                                text=[f"{v:.3f}" for v in demand_nodes['压力余量(m)']],
+                                textposition='auto',
+                                hovertemplate='节点: %{y}<br>压力余量: %{x:.3f} m<extra></extra>',
+                                showlegend=False,
+                            ))
+
+                            fig_margin.add_vline(
+                                x=0,
+                                line_dash='dash',
+                                line_color='green',
+                                line_width=2,
+                                annotation_text="余量=0",
+                                annotation_position="top right",
+                            )
+
+                            fig_margin.add_trace(go.Scatter(
+                                x=[None], y=[None],
+                                mode='markers',
+                                marker=dict(size=10, color='#DC3545'),
+                                name='瓶颈节点 (余量最小Top3)',
+                                showlegend=True,
+                            ))
+                            fig_margin.add_trace(go.Scatter(
+                                x=[None], y=[None],
+                                mode='markers',
+                                marker=dict(size=10, color='#4A90D9'),
+                                name='其他需求节点',
+                                showlegend=True,
+                            ))
+
+                            fig_margin.update_layout(
+                                title="需求节点压力余量分布（从小到大排列）",
+                                xaxis_title="压力余量 (m)",
+                                yaxis_title="节点名称",
+                                height=max(300, len(demand_nodes) * 35 + 100),
+                                margin=dict(l=80, r=30, t=60, b=40),
+                                legend=dict(
+                                    x=0.7,
+                                    y=1.1,
+                                    orientation='h',
+                                ),
+                            )
+                            st.plotly_chart(fig_margin, use_container_width=True)
+
+                            st.markdown(f"**瓶颈节点（压力余量最小的3个）:** {', '.join(bottleneck_nodes)}")
+                            for _, row in demand_nodes.iterrows():
+                                if row['节点名称'] in bottleneck_set:
+                                    margin_val = row['压力余量(m)']
+                                    if margin_val < 0:
+                                        st.error(f"❌ {row['节点名称']}: 压力余量 {margin_val:.3f}m，未满足约束")
+                                    elif margin_val < 2:
+                                        st.warning(f"⚠️ {row['节点名称']}: 压力余量仅 {margin_val:.3f}m，接近约束边界")
+                                    else:
+                                        st.info(f"📌 {row['节点名称']}: 压力余量 {margin_val:.3f}m")
+
+                    st.divider()
+                    st.subheader("🧪 水质影响评估")
+
+                    if hc_result is not None:
+                        pre_wq = st.session_state.water_quality_results
+                        k_decay_for_opt = st.session_state.get('chlorine_decay_k', 0.5)
+                        source_chlorine_for_opt = 1.0
+
+                        best_pipes = opt_result['best_pipes']
+                        post_wq = calculate_water_quality(
+                            nodes_df, best_pipes, hc_result,
+                            k_decay=k_decay_for_opt,
+                            source_chlorine=source_chlorine_for_opt,
+                        )
+
+                        if pre_wq is not None:
+                            pre_cl_map = {nr['节点名称']: nr['余氯浓度(mg/L)'] for nr in pre_wq['node_chlorine']}
+                        else:
+                            pre_hydraulic = st.session_state.hydraulic_results
+                            if pre_hydraulic is not None:
+                                pre_wq_calc = calculate_water_quality(
+                                    nodes_df, pipes_df, pre_hydraulic,
+                                    k_decay=k_decay_for_opt,
+                                    source_chlorine=source_chlorine_for_opt,
+                                )
+                                pre_cl_map = {nr['节点名称']: nr['余氯浓度(mg/L)'] for nr in pre_wq_calc['node_chlorine']}
+                            else:
+                                pre_cl_map = {}
+
+                        post_cl_map = {nr['节点名称']: nr['余氯浓度(mg/L)'] for nr in post_wq['node_chlorine']}
+
+                        wq_compare_rows = []
+                        for _, row in nodes_df.iterrows():
+                            name = row['节点名称']
+                            pre_cl = pre_cl_map.get(name, 0.0)
+                            post_cl = post_cl_map.get(name, 0.0)
+                            delta = post_cl - pre_cl
+                            risk = "⚠️ 不达标" if (row['类型'] == '需求' and post_cl < 0.05) else ""
+                            wq_compare_rows.append({
+                                '节点名称': name,
+                                '类型': row['类型'],
+                                '优化前余氯(mg/L)': round(pre_cl, 6),
+                                '优化后余氯(mg/L)': round(post_cl, 6),
+                                '变化量(mg/L)': round(delta, 6),
+                                '状态': risk,
+                            })
+
+                        wq_compare_df = pd.DataFrame(wq_compare_rows)
+
+                        def highlight_risk(row):
+                            if row['状态'] == "⚠️ 不达标":
+                                return ['background-color: #f8d7da; color: #721c24'] * len(row)
+                            return [''] * len(row)
+
+                        styled_wq = wq_compare_df.style.apply(highlight_risk, axis=1)
+                        st.dataframe(styled_wq, use_container_width=True, hide_index=True)
+
+                        at_risk_nodes = [r for r in wq_compare_rows if r['状态'] == "⚠️ 不达标"]
+                        if at_risk_nodes:
+                            for r in at_risk_nodes:
+                                st.error(f"⚠️ 管径优化后该节点存在余氯不达标风险，建议重新评估: {r['节点名称']} (余氯: {r['优化后余氯(mg/L)']:.4f} mg/L < 0.05 mg/L)")
+                        else:
+                            st.success("✅ 管径优化后所有需求节点余氯浓度均达标 (≥0.05 mg/L)")
